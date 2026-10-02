@@ -7,7 +7,7 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <title>Tábor Tracker</title>
 
-  <!-- MapLibre GL JS & PMTiles v3 (obsahuje podporu pro lokální soubory) -->
+  <!-- MapLibre GL JS & PMTiles v3 -->
   <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/pmtiles@3.0.7/dist/pmtiles.js"></script>
@@ -89,15 +89,15 @@
   <div id="map"></div>
 
   <div class="panel">
-    <div id="mapInfo" style="margin-bottom: 6px; font-size: 12px; color: #aaa;">Žádná mapa není načtena</div>
+    <div id="mapInfo" style="margin-bottom: 6px; font-size: 12px; color: #aaa;">Kontroluji uloženou mapu...</div>
 
     <input type="file" id="mapFileInput" accept=".pmtiles" style="display:none;" onchange="handleFileSelection(event)">
-    <label class="btn" id="lblChoose" for="mapFileInput">📁 VYBRAT .PMTILES SOUBOR</label>
+    <label class="btn" id="lblChoose" for="mapFileInput" style="display:none;">📁 VYBRAT .PMTILES SOUBOR</label>
 
     <button id="btnConnect" onclick="connectBle()" style="display:none; background: #4CAF50;">📡 PŘIPOJIT ESP32 (BLE)</button>
-    <button id="btnReset" class="btn-reset" onclick="resetApp()">🗑️ SMAZAT / RESETOVAT MAPU</button>
+    <button id="btnReset" class="btn-reset" onclick="resetApp()" style="display:none;">🗑️ ZMĚNIT / SMAZAT MAPU</button>
 
-    <div id="status">Vyberte soubor mapy z paměti telefonu.</div>
+    <div id="status">Načítám...</div>
   </div>
 
   <script>
@@ -113,11 +113,45 @@
     let bleCharacteristic = null;
     let watchId = null;
 
-    // Vlastní neprůstřelný adaptér pro čtení lokálního souboru
+    // --- IndexedDB vrstva pro trvalé uchování odkazu na soubor ---
+    function openDb() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open("TaborTrackerDB", 1);
+        req.onupgradeneeded = () => req.result.createObjectStore("handles");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function storeFileHandle(fileOrHandle, name) {
+      const db = await openDb();
+      const tx = db.transaction("handles", "readwrite");
+      tx.objectStore("handles").put({ data: fileOrHandle, name: name }, "active_map");
+      return tx.complete;
+    }
+
+    async function getStoredFileHandle() {
+      const db = await openDb();
+      return new Promise((resolve) => {
+        const tx = db.transaction("handles", "readonly");
+        const req = tx.objectStore("handles").get("active_map");
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      });
+    }
+
+    async function clearStoredFileHandle() {
+      const db = await openDb();
+      const tx = db.transaction("handles", "readwrite");
+      tx.objectStore("handles").delete("active_map");
+      return tx.complete;
+    }
+
+    // --- PMTiles Adaptér ---
     class LocalFileSource {
       constructor(file) {
         this.file = file;
-        this.key = "local://" + file.name;
+        this.key = "local://" + (file.name || "map.pmtiles");
       }
       async getBytes(offset, length) {
         const slice = this.file.slice(offset, offset + length);
@@ -129,12 +163,11 @@
       }
     }
 
-    // Inicializace protokolu pmtiles pro MapLibre
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    function resetApp() {
-      localStorage.clear();
+    async function resetApp() {
+      await clearStoredFileHandle();
       if (map) {
         map.remove();
         map = null;
@@ -145,49 +178,48 @@
       document.getElementById("mapInfo").innerHTML = "Žádná mapa není načtena";
       document.getElementById("lblChoose").style.display = "block";
       document.getElementById("btnConnect").style.display = "none";
-      document.getElementById("status").innerHTML = "<span style='color:#4CAF50;'>Aplikace vyčištěna.</span> Vyberte soubor.";
+      document.getElementById("btnReset").style.display = "none";
+      document.getElementById("status").innerHTML = "<span style='color:#4CAF50;'>Paměť vyčištěna.</span> Vyberte nový soubor.";
     }
 
     async function handleFileSelection(event) {
       const file = event.target.files[0];
       if (!file) return;
 
-      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      document.getElementById("status").innerText = `Čtu hlavičku mapy (${sizeMb} MB)...`;
+      document.getElementById("status").innerText = `Ukládám a čtu mapu (${(file.size / (1024*1024)).toFixed(0)} MB)...`;
 
       try {
-        // Použijeme buď zabudovaný FileSource z v3, nebo náš zaručený fallback
-        const source = (pmtiles.FileSource) ? new pmtiles.FileSource(file) : new LocalFileSource(file);
-        const p = new pmtiles.PMTiles(source);
-        protocol.add(p);
-
-        // Rychlý test načtení hlavičky
-        const header = await p.getHeader();
-        console.log("PMTiles Header:", header);
-
-        initMapWithPMTiles(p, file.name, header);
+        await storeFileHandle(file, file.name);
+        await loadMapFromFile(file, file.name);
       } catch (err) {
-        console.error("Chyba čtení PMTiles:", err);
-        document.getElementById("status").innerHTML = `<b style='color:red;'>Neplatný soubor:</b> ${err.message}`;
+        console.error("Chyba:", err);
+        document.getElementById("status").innerHTML = `<b style='color:red;'>Chyba:</b> ${err.message}`;
       }
     }
 
-    function initMapWithPMTiles(pInstance, fileName, header) {
-      document.getElementById("mapInfo").innerHTML = `Mapa: <span class="badge">${fileName}</span>`;
-      document.getElementById("status").innerText = "Sestavuji mapové vrstvy...";
+    async function loadMapFromFile(file, fileName) {
+      document.getElementById("mapInfo").innerHTML = `Aktivní mapa: <span class="badge">${fileName}</span>`;
+      document.getElementById("status").innerText = "Inicializuji vrstvy...";
+
+      const source = (pmtiles.FileSource) ? new pmtiles.FileSource(file) : new LocalFileSource(file);
+      const p = new pmtiles.PMTiles(source);
+      protocol.add(p);
+
+      const header = await p.getHeader();
 
       if (map) {
         map.remove();
         userMarker = null;
       }
 
-      // Bezpečný kontrastní styl pro české i světové PMTiles
+      // Vektorový styl s podporou hlubokého zoomu (overzooming)
       const style = {
         version: 8,
         sources: {
           "pmtiles-source": {
             type: "vector",
-            url: `pmtiles://${pInstance.source.getKey()}`
+            url: `pmtiles://${p.source.getKey()}`,
+            maxzoom: header.maxZoom || 14 // Zdroj končí na maxZoom, ale mapa zoomuje dál!
           }
         },
         layers: [
@@ -222,14 +254,14 @@
             type: "line",
             source: "pmtiles-source",
             "source-layer": "transportation",
-            paint: { "line-color": "#9e9687", "line-width": 1.2 }
+            paint: { "line-color": "#9e9687", "line-width": 1.5 }
           },
           {
             id: "roads-fallback",
             type: "line",
             source: "pmtiles-source",
             "source-layer": "roads",
-            paint: { "line-color": "#9e9687", "line-width": 1.2 }
+            paint: { "line-color": "#9e9687", "line-width": 1.5 }
           },
           {
             id: "buildings",
@@ -243,27 +275,46 @@
 
       const centerLon = header.centerLon || (header.minLon + header.maxLon) / 2 || 15.0;
       const centerLat = header.centerLat || (header.minLat + header.maxLat) / 2 || 50.0;
-      const startZoom = header.centerZoom || Math.max(header.minZoom || 0, 7);
+      const startZoom = header.centerZoom || Math.max(header.minZoom || 0, 8);
 
       map = new maplibregl.Map({
         container: 'map',
         style: style,
         center: [centerLon, centerLat],
         zoom: startZoom,
-        minZoom: header.minZoom || 0,
-        maxZoom: header.maxZoom || 16
-      });
-
-      map.on('error', (e) => {
-        console.warn("MapLibre poznámka:", e);
+        minZoom: 0,
+        maxZoom: 21 // Zde je umožněn detailní hluboký zoom až do úrovně 21
       });
 
       map.on('load', () => {
         document.getElementById("lblChoose").style.display = "none";
         document.getElementById("btnConnect").style.display = "block";
-        document.getElementById("status").innerHTML = `<b style='color:#4CAF50;'>Mapa připravena!</b> Souřadnice: ${centerLat.toFixed(2)}, ${centerLon.toFixed(2)}`;
+        document.getElementById("btnReset").style.display = "block";
+        document.getElementById("status").innerHTML = "<b style='color:#4CAF50;'>Mapa připravena!</b> Můžete přiblížit i připojit BLE.";
       });
     }
+
+    // Automatická kontrola uložené mapy při každém otevření aplikace
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const stored = await getStoredFileHandle();
+        if (stored && stored.data) {
+          document.getElementById("status").innerText = "Načítám zapamatovanou mapu z telefonu...";
+          let file = stored.data;
+          // Pokud je to FileHandle, získáme File
+          if (file.getFile) file = await file.getFile();
+          await loadMapFromFile(file, stored.name || "Uložená mapa");
+        } else {
+          document.getElementById("mapInfo").innerHTML = "Žádná mapa není načtena";
+          document.getElementById("lblChoose").style.display = "block";
+          document.getElementById("status").innerText = "Vyberte soubor mapy (.pmtiles) z telefonu.";
+        }
+      } catch (err) {
+        console.warn("Chyba auto-loadu:", err);
+        document.getElementById("lblChoose").style.display = "block";
+        document.getElementById("status").innerText = "Vyberte soubor mapy z paměti telefonu.";
+      }
+    });
 
     async function connectBle() {
       const status = document.getElementById("status");
@@ -300,7 +351,7 @@
             userMarker = new maplibregl.Marker({ color: "#2196F3" })
               .setLngLat([lon, lat])
               .addTo(map);
-            map.flyTo({ center: [lon, lat], zoom: 14 });
+            map.flyTo({ center: [lon, lat], zoom: 16 });
           } else if (userMarker) {
             userMarker.setLngLat([lon, lat]);
           }
