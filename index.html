@@ -11,8 +11,6 @@
   <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/pmtiles@2.11.0/dist/index.js"></script>
-  <!-- Oficiální styl pro Protomaps/PMTiles OSM data -->
-  <script src="https://unpkg.com/protomaps-themes-base@1.3.1/dist/index.js"></script>
 
   <style>
     body {
@@ -30,38 +28,20 @@
       width: 100%;
       height: 100%;
       z-index: 1;
-      background: #222;
-    }
-    #btnChangeMap {
-      position: absolute;
-      top: 16px;
-      right: 16px;
-      z-index: 10;
-      background: rgba(30, 30, 30, 0.85);
-      border: 1px solid #555;
-      color: #eee;
-      border-radius: 50%;
-      width: 44px;
-      height: 44px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 20px;
-      cursor: pointer;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+      background: #1e1e1e;
     }
     .panel {
       position: absolute;
       bottom: 16px;
       left: 16px;
       right: 16px;
-      background: rgba(30, 30, 30, 0.92);
+      background: rgba(25, 25, 25, 0.95);
       backdrop-filter: blur(8px);
       border-radius: 12px;
       padding: 14px 16px;
       z-index: 10;
       border: 1px solid #444;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.6);
     }
     button, label.btn {
       display: block;
@@ -76,8 +56,16 @@
       cursor: pointer;
       margin: 6px 0;
       box-sizing: border-box;
+      text-decoration: none;
     }
     button:active, label.btn:active { background: #0b7dda; }
+    .btn-reset {
+      background: #c62828 !important;
+      font-size: 13px !important;
+      padding: 8px !important;
+      margin-top: 8px !important;
+    }
+    .btn-reset:active { background: #8e0000 !important; }
     #status {
       font-size: 13px;
       margin-top: 6px;
@@ -91,7 +79,8 @@
       border-radius: 4px;
       font-size: 11px;
       font-weight: bold;
-      background: #444;
+      background: #333;
+      color: #4CAF50;
     }
   </style>
 </head>
@@ -99,14 +88,14 @@
 
   <div id="map"></div>
 
-  <div id="btnChangeMap" title="Zvolit jinou mapu" onclick="triggerFileInput()">🗺️</div>
-  <input type="file" id="mapFileInput" accept=".pmtiles" style="display:none;" onchange="handleFileSelection(event)">
-
   <div class="panel">
-    <div id="mapInfo" style="margin-bottom: 6px; font-size: 12px; color: #888;">Žádná mapa není načtena</div>
+    <div id="mapInfo" style="margin-bottom: 6px; font-size: 12px; color: #aaa;">Žádná mapa není načtena</div>
 
-    <label class="btn" id="lblChoose" for="mapFileInput">VYBRAT PMTILES SOUBOR</label>
-    <button id="btnConnect" onclick="connectBle()" style="display:none; background: #4CAF50;">PŘIPOJIT ESP32 (BLE)</button>
+    <input type="file" id="mapFileInput" accept=".pmtiles" style="display:none;" onchange="handleFileSelection(event)">
+    <label class="btn" id="lblChoose" for="mapFileInput">📁 VYBRAT .PMTILES SOUBOR</label>
+
+    <button id="btnConnect" onclick="connectBle()" style="display:none; background: #4CAF50;">📡 PŘIPOJIT ESP32 (BLE)</button>
+    <button id="btnReset" class="btn-reset" onclick="resetApp()">🗑️ SMAZAT / RESETOVAT MAPU</button>
 
     <div id="status">Vyberte soubor mapy z paměti telefonu.</div>
   </div>
@@ -124,75 +113,142 @@
     let bleCharacteristic = null;
     let watchId = null;
 
+    // Inicializace protokolu pmtiles
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
-    function triggerFileInput() {
-      document.getElementById('mapFileInput').click();
+    function resetApp() {
+      // Vyčistit lokální úložiště
+      localStorage.clear();
+
+      if (map) {
+        map.remove();
+        map = null;
+      }
+      userMarker = null;
+
+      // Reset formuláře
+      document.getElementById("mapFileInput").value = "";
+      document.getElementById("mapInfo").innerHTML = "Žádná mapa není načtena";
+      document.getElementById("lblChoose").style.display = "block";
+      document.getElementById("btnConnect").style.display = "none";
+      document.getElementById("status").innerHTML = "<span style='color:#4CAF50;'>Aplikace resetována.</span> Vyberte nový soubor.";
     }
 
-    function handleFileSelection(event) {
+    async function handleFileSelection(event) {
       const file = event.target.files[0];
       if (!file) return;
 
-      document.getElementById("status").innerText = "Otevírám soubor (" + (file.size / (1024*1024)).toFixed(1) + " MB)...";
-      initMap(file, file.name);
-    }
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+      document.getElementById("status").innerText = `Čtu hlavičku souboru (${sizeMb} MB)...`;
 
-    async function initMap(file, name) {
-      document.getElementById("mapInfo").innerHTML = `Aktivní mapa: <span class="badge">${name}</span>`;
-      
       try {
         const p = new pmtiles.PMTiles(new pmtiles.FileSource(file));
         protocol.add(p);
 
-        // Zjištění rozsahu a metadat ze souboru (zda je to platný PMTiles)
+        // Ověříme integritu souboru přečtením hlavičky
         const header = await p.getHeader();
         console.log("PMTiles Header:", header);
 
-        if (map) {
-          map.remove();
-          userMarker = null;
-        }
-
-        // Automatické generování kompletního stylu (silnice, lesy, řeky, budovy)
-        // pro zdroj 'protomaps'
-        const layers = protomapsThemesBase.default("protomaps", "dark");
-
-        map = new maplibregl.Map({
-          container: 'map',
-          style: {
-            version: 8,
-            glyphs: "https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf",
-            sources: {
-              "protomaps": {
-                type: "vector",
-                url: `pmtiles://${p.source.key}`
-              }
-            },
-            layers: layers
-          },
-          center: [header.centerLon || 15.0, header.centerLat || 50.0],
-          zoom: header.centerZoom || 7,
-          minZoom: header.minZoom || 0,
-          maxZoom: header.maxZoom || 15
-        });
-
-        map.on('error', (e) => {
-          console.error("MapLibre error:", e);
-          document.getElementById("status").innerHTML = `<b style='color:orange;'>Chyba vrstvy:</b> ${e.error?.message || 'Nelze vykreslit dlaždici'}`;
-        });
-
-        map.on('load', () => {
-          document.getElementById("lblChoose").style.display = "none";
-          document.getElementById("btnConnect").style.display = "block";
-          document.getElementById("status").innerHTML = "<b style='color:#4CAF50;'>Mapa vykreslena!</b> Můžete připojit ESP32.";
-        });
-
+        initMapWithPMTiles(p, file.name, header);
       } catch (err) {
-        console.error("Chyba při otevírání:", err);
-        document.getElementById("status").innerHTML = `<b style='color:red;'>Chyba souboru:</b> ${err.message}. Ujistěte se, že jde o validní PMTiles.`;
+        console.error("Chyba čtení PMTiles:", err);
+        document.getElementById("status").innerHTML = `<b style='color:red;'>Neplatný soubor:</b> ${err.message}`;
       }
+    }
+
+    function initMapWithPMTiles(pInstance, fileName, header) {
+      document.getElementById("mapInfo").innerHTML = `Mapa: <span class="badge">${fileName}</span>`;
+      document.getElementById("status").innerText = "Inicializuji zobrazení...";
+
+      if (map) {
+        map.remove();
+        userMarker = null;
+      }
+
+      // Univerzální bezpečný styl pro OpenMapTiles / Protomaps
+      const style = {
+        version: 8,
+        sources: {
+          "pmtiles-source": {
+            type: "vector",
+            url: `pmtiles://${pInstance.source.key}`
+          }
+        },
+        layers: [
+          {
+            id: "background",
+            type: "background",
+            paint: { "background-color": "#1a1f1d" }
+          },
+          {
+            id: "water",
+            type: "fill",
+            source: "pmtiles-source",
+            "source-layer": "water",
+            paint: { "fill-color": "#23496d" }
+          },
+          {
+            id: "landcover",
+            type: "fill",
+            source: "pmtiles-source",
+            "source-layer": "landcover",
+            paint: { "fill-color": "#243427", "fill-opacity": 0.6 }
+          },
+          {
+            id: "park",
+            type: "fill",
+            source: "pmtiles-source",
+            "source-layer": "park",
+            paint: { "fill-color": "#2e4632" }
+          },
+          {
+            id: "roads",
+            type: "line",
+            source: "pmtiles-source",
+            "source-layer": "transportation",
+            paint: { "line-color": "#8b8579", "line-width": 1.2 }
+          },
+          {
+            id: "roads-fallback",
+            type: "line",
+            source: "pmtiles-source",
+            "source-layer": "roads",
+            paint: { "line-color": "#8b8579", "line-width": 1.2 }
+          },
+          {
+            id: "buildings",
+            type: "fill",
+            source: "pmtiles-source",
+            "source-layer": "building",
+            paint: { "fill-color": "#3a3a3a", "fill-opacity": 0.7 }
+          }
+        ]
+      };
+
+      const centerLon = header.centerLon || (header.minLon + header.maxLon) / 2 || 15.0;
+      const centerLat = header.centerLat || (header.minLat + header.maxLat) / 2 || 50.0;
+      const startZoom = header.centerZoom || Math.max(header.minZoom || 0, 7);
+
+      map = new maplibregl.Map({
+        container: 'map',
+        style: style,
+        center: [centerLon, centerLat],
+        zoom: startZoom,
+        minZoom: header.minZoom || 0,
+        maxZoom: header.maxZoom || 16
+      });
+
+      map.on('error', (e) => {
+        // Některé vrstvy v souboru nemusí existovat, to nevadí
+        console.warn("MapLibre zpráva:", e);
+      });
+
+      map.on('load', () => {
+        document.getElementById("lblChoose").style.display = "none";
+        document.getElementById("btnConnect").style.display = "block";
+        document.getElementById("status").innerHTML = `<b style='color:#4CAF50;'>Mapa připravena!</b> Zoom: ${startZoom.toFixed(1)}`;
+      });
     }
 
     async function connectBle() {
