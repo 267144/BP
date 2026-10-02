@@ -36,7 +36,6 @@
       margin: 8px 0;
     }
     button:active { background: #3e8e41; }
-    #installBtn { background: #2196F3; display: none; }
     #status {
       margin-top: 15px;
       font-size: 14px;
@@ -54,10 +53,9 @@
   <div class="card">
     <h2>Tábor Tracker</h2>
 
-    <button id="installBtn" onclick="installPWA()">NAINSTALOVAT APLIKACI</button>
-    <button onclick="startTracking()">SPUSTIT GPS TRACKING</button>
+    <button onclick="connectAndTrack()">PŘIPOJIT A SPUSTIT GPS</button>
 
-    <div id="status">Stav: Čeká na spuštění</div>
+    <div id="status">Stav: Čeká na připojení...</div>
   </div>
 
   <script>
@@ -65,29 +63,35 @@
       navigator.serviceWorker.register('sw.js');
     }
 
-    let deferredPrompt;
-    const installBtn = document.getElementById('installBtn');
+    let socket = null;
+    let watchId = null;
 
-    // Zachycení výzvy k instalaci
-    window.addEventListener('beforeinstallprompt', (e) => {
-      e.preventDefault();
-      deferredPrompt = e;
-      installBtn.style.display = 'block';
-    });
+    function connectAndTrack() {
+      const status = document.getElementById("status");
+      status.innerHTML = "Připojuji k WebSocketu ws://192.168.4.1:81...";
 
-    function installPWA() {
-      if (deferredPrompt) {
-        deferredPrompt.prompt();
-        deferredPrompt.userChoice.then((choiceResult) => {
-          if (choiceResult.outcome === 'accepted') {
-            installBtn.style.display = 'none';
-          }
-          deferredPrompt = null;
-        });
-      }
+      // Otevření WebSocket spojení přímo na ESP32
+      socket = new WebSocket("ws://192.168.4.1:81");
+
+      socket.onopen = () => {
+        status.innerHTML = "<b style='color:#4CAF50;'>WebSocket připojen!</b><br>Spouštím GPS sledování...";
+        startGps();
+      };
+
+      socket.onmessage = (event) => {
+        console.log("ESP32:", event.data);
+      };
+
+      socket.onerror = (error) => {
+        status.innerHTML = "<b style='color:red;'>Chyba WebSocketu.</b> Zkontroluj, zda jsi na Wi-Fi Tabor-Tracker-A.";
+      };
+
+      socket.onclose = () => {
+        status.innerHTML += "<br><span style='color:orange;'>WebSocket odpojen.</span>";
+      };
     }
 
-    function startTracking() {
+    function startGps() {
       const status = document.getElementById("status");
 
       if (!navigator.geolocation) {
@@ -95,9 +99,7 @@
         return;
       }
 
-      status.innerHTML = "Získávám GPS polohu...";
-
-      navigator.geolocation.watchPosition(
+      watchId = navigator.geolocation.watchPosition(
         (pos) => {
           const payload = {
             latitude: pos.coords.latitude,
@@ -106,20 +108,12 @@
             timestamp: pos.timestamp
           };
 
-          status.innerHTML = `<b>GPS Získána:</b><br>Lat: ${payload.latitude.toFixed(6)}<br>Lon: ${payload.longitude.toFixed(6)}<br>Přesnost: ±${payload.accuracy.toFixed(1)} m<br><br>Odesílám do ESP32...`;
+          status.innerHTML = `<b style='color:#4CAF50;'>Spojení aktivní:</b><br>Lat: ${payload.latitude.toFixed(6)}<br>Lon: ${payload.longitude.toFixed(6)}<br>Přesnost: ±${payload.accuracy.toFixed(1)} m<br>Odesláno na ESP32 via WS.`;
 
-          fetch("http://192.168.4.1/api/location", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          })
-          .then(res => res.text())
-          .then(txt => {
-            status.innerHTML += `<br><b style='color:#4CAF50;'>Uloženo do ESP32! [${txt}]</b>`;
-          })
-          .catch(err => {
-            status.innerHTML += `<br><span style='color:orange;'>Chyba přenosu na 192.168.4.1 (zkontroluj Wi-Fi a CORS/PNA)</span>`;
-          });
+          // Odeslání do ESP32 přes otevřený socket
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify(payload));
+          }
         },
         (err) => {
           status.innerHTML = `<b style='color:red;'>Chyba GPS:</b> ${err.message}`;
