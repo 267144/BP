@@ -7,10 +7,10 @@
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <title>Tábor Tracker</title>
 
-  <!-- MapLibre GL JS & PMTiles -->
+  <!-- MapLibre GL JS & PMTiles v3 (obsahuje podporu pro lokální soubory) -->
   <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
-  <script src="https://unpkg.com/pmtiles@2.11.0/dist/index.js"></script>
+  <script src="https://unpkg.com/pmtiles@3.0.7/dist/pmtiles.js"></script>
 
   <style>
     body {
@@ -113,26 +113,39 @@
     let bleCharacteristic = null;
     let watchId = null;
 
-    // Inicializace protokolu pmtiles
+    // Vlastní neprůstřelný adaptér pro čtení lokálního souboru
+    class LocalFileSource {
+      constructor(file) {
+        this.file = file;
+        this.key = "local://" + file.name;
+      }
+      async getBytes(offset, length) {
+        const slice = this.file.slice(offset, offset + length);
+        const buffer = await slice.arrayBuffer();
+        return { data: buffer };
+      }
+      getKey() {
+        return this.key;
+      }
+    }
+
+    // Inicializace protokolu pmtiles pro MapLibre
     const protocol = new pmtiles.Protocol();
     maplibregl.addProtocol("pmtiles", protocol.tile);
 
     function resetApp() {
-      // Vyčistit lokální úložiště
       localStorage.clear();
-
       if (map) {
         map.remove();
         map = null;
       }
       userMarker = null;
 
-      // Reset formuláře
       document.getElementById("mapFileInput").value = "";
       document.getElementById("mapInfo").innerHTML = "Žádná mapa není načtena";
       document.getElementById("lblChoose").style.display = "block";
       document.getElementById("btnConnect").style.display = "none";
-      document.getElementById("status").innerHTML = "<span style='color:#4CAF50;'>Aplikace resetována.</span> Vyberte nový soubor.";
+      document.getElementById("status").innerHTML = "<span style='color:#4CAF50;'>Aplikace vyčištěna.</span> Vyberte soubor.";
     }
 
     async function handleFileSelection(event) {
@@ -140,13 +153,15 @@
       if (!file) return;
 
       const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
-      document.getElementById("status").innerText = `Čtu hlavičku souboru (${sizeMb} MB)...`;
+      document.getElementById("status").innerText = `Čtu hlavičku mapy (${sizeMb} MB)...`;
 
       try {
-        const p = new pmtiles.PMTiles(new pmtiles.FileSource(file));
+        // Použijeme buď zabudovaný FileSource z v3, nebo náš zaručený fallback
+        const source = (pmtiles.FileSource) ? new pmtiles.FileSource(file) : new LocalFileSource(file);
+        const p = new pmtiles.PMTiles(source);
         protocol.add(p);
 
-        // Ověříme integritu souboru přečtením hlavičky
+        // Rychlý test načtení hlavičky
         const header = await p.getHeader();
         console.log("PMTiles Header:", header);
 
@@ -159,20 +174,20 @@
 
     function initMapWithPMTiles(pInstance, fileName, header) {
       document.getElementById("mapInfo").innerHTML = `Mapa: <span class="badge">${fileName}</span>`;
-      document.getElementById("status").innerText = "Inicializuji zobrazení...";
+      document.getElementById("status").innerText = "Sestavuji mapové vrstvy...";
 
       if (map) {
         map.remove();
         userMarker = null;
       }
 
-      // Univerzální bezpečný styl pro OpenMapTiles / Protomaps
+      // Bezpečný kontrastní styl pro české i světové PMTiles
       const style = {
         version: 8,
         sources: {
           "pmtiles-source": {
             type: "vector",
-            url: `pmtiles://${pInstance.source.key}`
+            url: `pmtiles://${pInstance.source.getKey()}`
           }
         },
         layers: [
@@ -193,7 +208,7 @@
             type: "fill",
             source: "pmtiles-source",
             "source-layer": "landcover",
-            paint: { "fill-color": "#243427", "fill-opacity": 0.6 }
+            paint: { "fill-color": "#243427", "fill-opacity": 0.5 }
           },
           {
             id: "park",
@@ -207,21 +222,21 @@
             type: "line",
             source: "pmtiles-source",
             "source-layer": "transportation",
-            paint: { "line-color": "#8b8579", "line-width": 1.2 }
+            paint: { "line-color": "#9e9687", "line-width": 1.2 }
           },
           {
             id: "roads-fallback",
             type: "line",
             source: "pmtiles-source",
             "source-layer": "roads",
-            paint: { "line-color": "#8b8579", "line-width": 1.2 }
+            paint: { "line-color": "#9e9687", "line-width": 1.2 }
           },
           {
             id: "buildings",
             type: "fill",
             source: "pmtiles-source",
             "source-layer": "building",
-            paint: { "fill-color": "#3a3a3a", "fill-opacity": 0.7 }
+            paint: { "fill-color": "#333333", "fill-opacity": 0.7 }
           }
         ]
       };
@@ -240,14 +255,13 @@
       });
 
       map.on('error', (e) => {
-        // Některé vrstvy v souboru nemusí existovat, to nevadí
-        console.warn("MapLibre zpráva:", e);
+        console.warn("MapLibre poznámka:", e);
       });
 
       map.on('load', () => {
         document.getElementById("lblChoose").style.display = "none";
         document.getElementById("btnConnect").style.display = "block";
-        document.getElementById("status").innerHTML = `<b style='color:#4CAF50;'>Mapa připravena!</b> Zoom: ${startZoom.toFixed(1)}`;
+        document.getElementById("status").innerHTML = `<b style='color:#4CAF50;'>Mapa připravena!</b> Souřadnice: ${centerLat.toFixed(2)}, ${centerLon.toFixed(2)}`;
       });
     }
 
