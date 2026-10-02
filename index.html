@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
   <title>Tábor Tracker</title>
   <style>
     body {
@@ -32,9 +33,10 @@
       border-radius: 8px;
       cursor: pointer;
       width: 100%;
-      margin: 10px 0;
+      margin: 8px 0;
     }
     button:active { background: #3e8e41; }
+    #installBtn { background: #2196F3; display: none; }
     #status {
       margin-top: 15px;
       font-size: 14px;
@@ -42,7 +44,7 @@
       background: #2a2a2a;
       padding: 12px;
       border-radius: 6px;
-      min-height: 60px;
+      min-height: 50px;
       word-break: break-all;
     }
   </style>
@@ -50,21 +52,40 @@
 <body>
 
   <div class="card">
-    <h2>Tábor Tracker (PWA)</h2>
-    <p>Odesílání polohy telefonu do krabičky vedoucího přes Wi-Fi AP.</p>
+    <h2>Tábor Tracker</h2>
 
-    <button onclick="startTracking()">1. SPUSTIT GPS A ODESÍLÁNÍ</button>
+    <button id="installBtn" onclick="installPWA()">NAINSTALOVAT APLIKACI</button>
+    <button onclick="startTracking()">SPUSTIT GPS TRACKING</button>
 
     <div id="status">Stav: Čeká na spuštění</div>
   </div>
 
   <script>
-    // Registrace Service Workeru pro offline režim
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js');
     }
 
-    let watchId = null;
+    let deferredPrompt;
+    const installBtn = document.getElementById('installBtn');
+
+    // Zachycení výzvy k instalaci
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      installBtn.style.display = 'block';
+    });
+
+    function installPWA() {
+      if (deferredPrompt) {
+        deferredPrompt.prompt();
+        deferredPrompt.userChoice.then((choiceResult) => {
+          if (choiceResult.outcome === 'accepted') {
+            installBtn.style.display = 'none';
+          }
+          deferredPrompt = null;
+        });
+      }
+    }
 
     function startTracking() {
       const status = document.getElementById("status");
@@ -76,8 +97,7 @@
 
       status.innerHTML = "Získávám GPS polohu...";
 
-      // watchPosition sleduje polohu kontinuálně při chůzi
-      watchId = navigator.geolocation.watchPosition(
+      navigator.geolocation.watchPosition(
         (pos) => {
           const payload = {
             latitude: pos.coords.latitude,
@@ -86,9 +106,8 @@
             timestamp: pos.timestamp
           };
 
-          status.innerHTML = `<b>GPS Získána:</b><br>Lat: ${payload.latitude.toFixed(6)}<br>Lon: ${payload.longitude.toFixed(6)}<br>Přesnost: ±${payload.accuracy.toFixed(1)} m<br><br>Odesílám do ESP32 (192.168.4.1)...`;
+          status.innerHTML = `<b>GPS Získána:</b><br>Lat: ${payload.latitude.toFixed(6)}<br>Lon: ${payload.longitude.toFixed(6)}<br>Přesnost: ±${payload.accuracy.toFixed(1)} m<br><br>Odesílám do ESP32...`;
 
-          // Odeslání do ESP32 běžícího na Wi-Fi
           fetch("http://192.168.4.1/api/location", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -99,17 +118,13 @@
             status.innerHTML += `<br><b style='color:#4CAF50;'>Uloženo do ESP32! [${txt}]</b>`;
           })
           .catch(err => {
-            status.innerHTML += `<br><span style='color:orange;'>ESP32 nedostupný (zkontroluj připojení k Wi-Fi Tabor-Tracker)</span>`;
+            status.innerHTML += `<br><span style='color:orange;'>Chyba přenosu na 192.168.4.1 (zkontroluj Wi-Fi a CORS/PNA)</span>`;
           });
         },
         (err) => {
           status.innerHTML = `<b style='color:red;'>Chyba GPS:</b> ${err.message}`;
         },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0
-        }
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     }
   </script>
