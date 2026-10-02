@@ -2,61 +2,114 @@
 <html lang="cs">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <title>Tábor Tracker</title>
+
+  <!-- MapLibre GL JS & PMTiles -->
+  <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/pmtiles@2.11.0/dist/index.js"></script>
+
   <style>
     body {
+      margin: 0;
+      padding: 0;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      text-align: center;
-      padding: 24px 16px;
       background: #121212;
       color: #eee;
+      overflow: hidden;
     }
-    .card {
-      background: #1e1e1e;
+    #map {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      background: #1a1a1a;
+    }
+    /* Tlačítko pro změnu mapy v pravém horním rohu */
+    #btnChangeMap {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      z-index: 10;
+      background: rgba(30, 30, 30, 0.85);
+      border: 1px solid #555;
+      color: #eee;
+      border-radius: 50%;
+      width: 44px;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+    /* Spodní ovládací panel */
+    .panel {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      right: 16px;
+      background: rgba(30, 30, 30, 0.92);
+      backdrop-filter: blur(8px);
       border-radius: 12px;
-      padding: 20px;
-      max-width: 420px;
-      margin: 0 auto;
-      border: 1px solid #333;
+      padding: 14px 16px;
+      z-index: 10;
+      border: 1px solid #444;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
     }
-    h2 { color: #4CAF50; margin-top: 0; }
-    button {
+    button, label.btn {
+      display: block;
+      text-align: center;
       background: #2196F3;
       color: white;
       border: none;
-      padding: 14px 20px;
-      font-size: 16px;
+      padding: 12px;
+      font-size: 15px;
       font-weight: bold;
       border-radius: 8px;
       cursor: pointer;
-      width: 100%;
-      margin: 8px 0;
+      margin: 6px 0;
+      text-decoration: none;
+      box-sizing: border-box;
     }
-    button:active { background: #0b7dda; }
+    button:active, label.btn:active { background: #0b7dda; }
     #status {
-      margin-top: 15px;
-      font-size: 14px;
-      text-align: left;
-      background: #2a2a2a;
-      padding: 12px;
-      border-radius: 6px;
-      min-height: 50px;
-      word-break: break-all;
+      font-size: 13px;
+      margin-top: 6px;
+      color: #bbb;
+      line-height: 1.4;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: bold;
+      background: #444;
     }
   </style>
 </head>
 <body>
 
-  <div class="card">
-    <h2>Tábor Tracker (Bluetooth)</h2>
-    <p>Přenos polohy telefonu do krabičky vedoucího přes BLE.</p>
+  <div id="map"></div>
 
-    <button id="btnConnect" onclick="connectBle()">PŘIPOJIT PŘES BLUETOOTH</button>
+  <!-- Plovoucí tlačítko pro výměnu mapového souboru -->
+  <div id="btnChangeMap" title="Změnit mapový soubor (.pmtiles)" onclick="triggerFileInput()">🗺️</div>
+  <input type="file" id="mapFileInput" accept=".pmtiles" style="display:none;" onchange="handleFileSelection(event)">
 
-    <div id="status">Stav: Bluetooth nepřipojen</div>
+  <div class="panel">
+    <div id="mapInfo" style="margin-bottom: 6px; font-size: 12px; color: #888;">Žádná mapa není načtena</div>
+
+    <label class="btn" id="lblChoose" for="mapFileInput">NAHRÁT SOUBOR MAPY (.pmtiles)</label>
+    <button id="btnConnect" onclick="connectBle()" style="display:none; background: #4CAF50;">PŘIPOJIT ESP32 (BLE)</button>
+
+    <div id="status">Vyberte soubor mapy z paměti telefonu.</div>
   </div>
 
   <script>
@@ -67,84 +120,184 @@
     const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
     const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
-    let bleDevice = null;
+    let map = null;
+    let userMarker = null;
     let bleCharacteristic = null;
     let watchId = null;
 
-    async function connectBle() {
-      const status = document.getElementById("status");
+    // Registrace PMTiles protokolu
+    const protocol = new pmtiles.Protocol();
+    maplibregl.addProtocol("pmtiles", protocol.tile);
 
-      if (!navigator.bluetooth) {
-        status.innerHTML = "<b style='color:red;'>Web Bluetooth není tímto prohlížečem podporován. Použijte Chrome pro Android.</b>";
-        return;
+    function triggerFileInput() {
+      document.getElementById('mapFileInput').click();
+    }
+
+    // Uložení a načtení mapy přes OPFS (Origin Private File System)
+    async function getOpfsRoot() {
+      return await navigator.storage.getDirectory();
+    }
+
+    async function saveMapToOpfs(file) {
+      const root = await getOpfsRoot();
+      const fileHandle = await root.getFileHandle("current_map.pmtiles", { create: true });
+      const writable = await fileHandle.createWritable();
+      await writable.write(file);
+      await writable.close();
+      localStorage.setItem("saved_map_name", file.name);
+    }
+
+    async function loadSavedMapFromOpfs() {
+      try {
+        const root = await getOpfsRoot();
+        const fileHandle = await root.getFileHandle("current_map.pmtiles");
+        const file = await fileHandle.getFile();
+        const mapName = localStorage.getItem("saved_map_name") || file.name;
+        initMapWithFile(file, mapName);
+      } catch (e) {
+        // Soubor ještě v paměti není – čekáme na první výběr uživatelem
+        document.getElementById("status").innerText = "Vyberte soubor mapy z paměti telefonu.";
+      }
+    }
+
+    async function handleFileSelection(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      document.getElementById("status").innerText = "Ukládám mapu do paměti aplikace...";
+      try {
+        await saveMapToOpfs(file);
+        initMapWithFile(file, file.name);
+      } catch (err) {
+        // Fallback pro prohlížeče bez plné podpory OPFS
+        initMapWithFile(file, file.name);
+      }
+    }
+
+    function initMapWithFile(file, name) {
+      document.getElementById("mapInfo").innerHTML = `Aktivní mapa: <span class="badge">${name}</span>`;
+      document.getElementById("status").innerHTML = "Načítám vektorové dlaždice...";
+
+      const p = new pmtiles.PMTiles(new pmtiles.FileSource(file));
+      protocol.add(p);
+
+      if (map) {
+        map.remove();
+        userMarker = null;
       }
 
-      try {
-        status.innerHTML = "Hledám krabičku přes Bluetooth...";
+      map = new maplibregl.Map({
+        container: 'map',
+        style: {
+          version: 8,
+          sources: {
+            "offline-source": {
+              type: "vector",
+              url: `pmtiles://${p.source.key}`
+            }
+          },
+          layers: [
+            {
+              id: "background",
+              type: "background",
+              paint: { "background-color": "#1f2421" }
+            },
+            {
+              id: "water",
+              type: "fill",
+              source: "offline-source",
+              "source-layer": "water",
+              paint: { "fill-color": "#214e68" }
+            },
+            {
+              id: "landuse",
+              type: "fill",
+              source: "offline-source",
+              "source-layer": "landuse",
+              paint: { "fill-color": "#28382c" }
+            },
+            {
+              id: "roads",
+              type: "line",
+              source: "offline-source",
+              "source-layer": "roads",
+              paint: { "line-color": "#8c8275", "line-width": 1.2 }
+            }
+          ]
+        },
+        center: [15.0, 50.0],
+        zoom: 7
+      });
 
-        // Vyžádání zařízení přes systémový dialog
-        bleDevice = await navigator.bluetooth.requestDevice({
+      map.on('load', () => {
+        document.getElementById("lblChoose").style.display = "none";
+        document.getElementById("btnConnect").style.display = "block";
+        document.getElementById("status").innerHTML = "<b style='color:#4CAF50;'>Mapa připravena.</b> Nyní připojte centrálu.";
+      });
+    }
+
+    async function connectBle() {
+      const status = document.getElementById("status");
+      try {
+        status.innerText = "Hledám krabičku přes BLE...";
+        const device = await navigator.bluetooth.requestDevice({
           filters: [{ name: "Tabor-Tracker-A" }],
           optionalServices: [SERVICE_UUID]
         });
 
-        status.innerHTML = "Připojuji k zařízení...";
-        const server = await bleDevice.gatt.connect();
-
+        const server = await device.gatt.connect();
         const service = await server.getPrimaryService(SERVICE_UUID);
         bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
-        status.innerHTML = "<b style='color:#4CAF50;'>Bluetooth spárován!</b><br>Spouštím GPS sledování...";
         document.getElementById("btnConnect").style.display = "none";
-
-        bleDevice.addEventListener('gattserverdisconnected', () => {
-          status.innerHTML = "<b style='color:red;'>Bluetooth odpojen.</b>";
-          document.getElementById("btnConnect").style.display = "block";
-          if (watchId) navigator.geolocation.clearWatch(watchId);
-        });
+        status.innerHTML = "<b style='color:#4CAF50;'>BLE Připojeno!</b> Sleduji GPS a centrálu...";
 
         startGps();
-
-      } catch (error) {
-        status.innerHTML = `<b style='color:orange;'>Připojení zrušeno nebo selhalo:</b> ${error.message}`;
+      } catch (err) {
+        status.innerText = "Chyba BLE: " + err.message;
       }
     }
 
     function startGps() {
-      const status = document.getElementById("status");
-
-      if (!navigator.geolocation) {
-        status.innerHTML += "<br><b style='color:red;'>Geolokace není dostupná.</b>";
-        return;
-      }
+      if (!navigator.geolocation) return;
 
       watchId = navigator.geolocation.watchPosition(
         async (pos) => {
-          // Kompaktní JSON pro úsporu BLE MTU
-          const payload = JSON.stringify({
-            lat: Number(pos.coords.latitude.toFixed(6)),
-            lon: Number(pos.coords.longitude.toFixed(6)),
-            acc: Number(pos.coords.accuracy.toFixed(1))
-          });
+          const lat = pos.coords.latitude;
+          const lon = pos.coords.longitude;
+          const acc = pos.coords.accuracy;
 
-          status.innerHTML = `<b style='color:#4CAF50;'>Spojení aktivní (BLE):</b><br>Lat: ${pos.coords.latitude.toFixed(6)}<br>Lon: ${pos.coords.longitude.toFixed(6)}<br>Přesnost: ±${pos.coords.accuracy.toFixed(1)} m<br><br>Odesílám do ESP32...`;
+          if (!userMarker && map) {
+            userMarker = new maplibregl.Marker({ color: "#2196F3" })
+              .setLngLat([lon, lat])
+              .addTo(map);
+            map.flyTo({ center: [lon, lat], zoom: 14 });
+          } else if (userMarker) {
+            userMarker.setLngLat([lon, lat]);
+          }
 
           if (bleCharacteristic) {
+            const payload = JSON.stringify({
+              lat: Number(lat.toFixed(6)),
+              lon: Number(lon.toFixed(6)),
+              acc: Number(acc.toFixed(1))
+            });
             try {
-              const encoder = new TextEncoder();
-              await bleCharacteristic.writeValue(encoder.encode(payload));
-              status.innerHTML += "<br><span style='color:#4CAF50;'>Zapsáno do ESP32 (OK)</span>";
-            } catch (err) {
-              status.innerHTML += `<br><span style='color:red;'>Chyba zápisu: ${err.message}</span>`;
+              await bleCharacteristic.writeValue(new TextEncoder().encode(payload));
+            } catch (e) {
+              console.warn("Chyba BLE zápisu:", e);
             }
           }
         },
-        (err) => {
-          status.innerHTML = `<b style='color:red;'>Chyba GPS:</b> ${err.message}`;
-        },
+        (err) => console.warn(err),
         { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
       );
     }
+
+    // Při startu aplikace zkontrolujeme, zda už máme mapu v paměti
+    window.addEventListener('DOMContentLoaded', () => {
+      loadSavedMapFromOpfs();
+    });
   </script>
 </body>
 </html>
