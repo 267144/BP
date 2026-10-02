@@ -24,7 +24,7 @@
     }
     h2 { color: #4CAF50; margin-top: 0; }
     button {
-      background: #4CAF50;
+      background: #2196F3;
       color: white;
       border: none;
       padding: 14px 20px;
@@ -35,7 +35,7 @@
       width: 100%;
       margin: 8px 0;
     }
-    button:active { background: #3e8e41; }
+    button:active { background: #0b7dda; }
     #status {
       margin-top: 15px;
       font-size: 14px;
@@ -51,11 +51,12 @@
 <body>
 
   <div class="card">
-    <h2>Tábor Tracker</h2>
+    <h2>Tábor Tracker (Bluetooth)</h2>
+    <p>Přenos polohy telefonu do krabičky vedoucího přes BLE.</p>
 
-    <button onclick="connectAndTrack()">PŘIPOJIT A SPUSTIT GPS</button>
+    <button id="btnConnect" onclick="connectBle()">PŘIPOJIT PŘES BLUETOOTH</button>
 
-    <div id="status">Stav: Čeká na připojení...</div>
+    <div id="status">Stav: Bluetooth nepřipojen</div>
   </div>
 
   <script>
@@ -63,56 +64,79 @@
       navigator.serviceWorker.register('sw.js');
     }
 
-    let socket = null;
+    const SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+    const CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+    let bleDevice = null;
+    let bleCharacteristic = null;
     let watchId = null;
 
-    function connectAndTrack() {
+    async function connectBle() {
       const status = document.getElementById("status");
-      status.innerHTML = "Připojuji k WebSocketu ws://192.168.4.1:81...";
 
-      // Otevření WebSocket spojení přímo na ESP32
-      socket = new WebSocket("ws://192.168.4.1:81");
+      if (!navigator.bluetooth) {
+        status.innerHTML = "<b style='color:red;'>Web Bluetooth není tímto prohlížečem podporován. Použijte Chrome pro Android.</b>";
+        return;
+      }
 
-      socket.onopen = () => {
-        status.innerHTML = "<b style='color:#4CAF50;'>WebSocket připojen!</b><br>Spouštím GPS sledování...";
+      try {
+        status.innerHTML = "Hledám krabičku přes Bluetooth...";
+
+        // Vyžádání zařízení přes systémový dialog
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [{ name: "Tabor-Tracker-A" }],
+          optionalServices: [SERVICE_UUID]
+        });
+
+        status.innerHTML = "Připojuji k zařízení...";
+        const server = await bleDevice.gatt.connect();
+
+        const service = await server.getPrimaryService(SERVICE_UUID);
+        bleCharacteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+        status.innerHTML = "<b style='color:#4CAF50;'>Bluetooth spárován!</b><br>Spouštím GPS sledování...";
+        document.getElementById("btnConnect").style.display = "none";
+
+        bleDevice.addEventListener('gattserverdisconnected', () => {
+          status.innerHTML = "<b style='color:red;'>Bluetooth odpojen.</b>";
+          document.getElementById("btnConnect").style.display = "block";
+          if (watchId) navigator.geolocation.clearWatch(watchId);
+        });
+
         startGps();
-      };
 
-      socket.onmessage = (event) => {
-        console.log("ESP32:", event.data);
-      };
-
-      socket.onerror = (error) => {
-        status.innerHTML = "<b style='color:red;'>Chyba WebSocketu.</b> Zkontroluj, zda jsi na Wi-Fi Tabor-Tracker-A.";
-      };
-
-      socket.onclose = () => {
-        status.innerHTML += "<br><span style='color:orange;'>WebSocket odpojen.</span>";
-      };
+      } catch (error) {
+        status.innerHTML = `<b style='color:orange;'>Připojení zrušeno nebo selhalo:</b> ${error.message}`;
+      }
     }
 
     function startGps() {
       const status = document.getElementById("status");
 
       if (!navigator.geolocation) {
-        status.innerHTML = "<b style='color:red;'>Geolokace není podporována.</b>";
+        status.innerHTML += "<br><b style='color:red;'>Geolokace není dostupná.</b>";
         return;
       }
 
       watchId = navigator.geolocation.watchPosition(
-        (pos) => {
-          const payload = {
-            latitude: pos.coords.latitude,
-            longitude: pos.coords.longitude,
-            accuracy: pos.coords.accuracy,
-            timestamp: pos.timestamp
-          };
+        async (pos) => {
+          // Kompaktní JSON pro úsporu BLE MTU
+          const payload = JSON.stringify({
+            lat: Number(pos.coords.latitude.toFixed(6)),
+            lon: Number(pos.coords.longitude.toFixed(6)),
+            acc: Number(pos.coords.accuracy.toFixed(1))
+          });
 
-          status.innerHTML = `<b style='color:#4CAF50;'>Spojení aktivní:</b><br>Lat: ${payload.latitude.toFixed(6)}<br>Lon: ${payload.longitude.toFixed(6)}<br>Přesnost: ±${payload.accuracy.toFixed(1)} m<br>Odesláno na ESP32 via WS.`;
+          status.innerHTML = `<b style='color:#4CAF50;'>Spojení aktivní (BLE):</b><br>Lat: ${pos.coords.latitude.toFixed(6)}<br>Lon: ${pos.coords.longitude.toFixed(6)}<br>Přesnost: ±${pos.coords.accuracy.toFixed(1)} m<br><br>Odesílám do ESP32...`;
 
-          // Odeslání do ESP32 přes otevřený socket
-          if (socket && socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify(payload));
+          if (bleCharacteristic) {
+            try {
+              const encoder = new TextEncoder();
+              await bleCharacteristic.writeValue(encoder.encode(payload));
+              status.innerHTML += "<br><span style='color:#4CAF50;'>Zapsáno do ESP32 (OK)</span>";
+            } catch (err) {
+              status.innerHTML += `<br><span style='color:red;'>Chyba zápisu: ${err.message}</span>`;
+            }
           }
         },
         (err) => {
